@@ -11,8 +11,7 @@ RUN npm run build
 FROM node:22-slim
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev && npm install --no-save supergateway@4.1.0
 COPY --from=builder /app/dist ./dist
 EXPOSE 3000
-ENTRYPOINT ["node", "dist/index.js"]
-CMD ["--transport", "sse", "--port", "3000"]
+CMD ["./node_modules/.bin/supergateway", "--stdio", "node dist/index.js", "--outputTransport", "streamableHttp", "--stateful", "--sessionTimeout", "60000", "--port", "3000", "--streamableHttpPath", "/mcp"]
