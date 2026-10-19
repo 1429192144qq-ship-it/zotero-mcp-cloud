@@ -135,3 +135,54 @@ export const FIXTURES = {
     totalPages: 10,
   } satisfies ZoteroFullText,
 } as const;
+
+// ---------------------------------------------------------------------------
+// Stub ZoteroClient (no network) for server and HTTP tests
+// ---------------------------------------------------------------------------
+
+/**
+ * A ZoteroClient stand-in whose methods are vi.fn() returning fixtures.
+ * Read methods resolve item/attachment fixtures by key; write methods are
+ * spies so tests can assert they were never reached.
+ */
+export function createStubZotero() {
+  const byKey: Record<string, ZoteroItem> = {
+    [FIXTURES.item.key]: FIXTURES.item,
+    [FIXTURES.attachmentItem.key]: FIXTURES.attachmentItem,
+    [FIXTURES.noteItem.key]: FIXTURES.noteItem,
+  };
+  const stub = {
+    listCollections: vi.fn(async () => ({
+      items: [FIXTURES.collection],
+      totalResults: 1,
+      offset: 0,
+      limit: 25,
+    })),
+    searchItems: vi.fn(async () => ({
+      items: [FIXTURES.item],
+      totalResults: 1,
+      offset: 0,
+      limit: 25,
+    })),
+    getItem: vi.fn(async (key: string) => {
+      const item = byKey[key];
+      if (!item) throw new Error(`Zotero API error (get item ${key}): 404 Not Found`);
+      return item;
+    }),
+    getItemChildren: vi.fn(async (key: string) =>
+      key === FIXTURES.item.key ? [FIXTURES.attachmentItem] : [],
+    ),
+    getFullText: vi.fn(async () => FIXTURES.fulltext),
+    downloadAttachment: vi.fn(async () => ({
+      data: Buffer.from("%PDF-1.4 test").toString("base64"),
+      contentType: "application/pdf",
+      filename: "test-article.pdf",
+    })),
+    createCollection: vi.fn(async () => FIXTURES.writeSuccess),
+    createNote: vi.fn(async () => FIXTURES.writeSuccess),
+    addItemToCollection: vi.fn(async () => undefined),
+  };
+  return stub;
+}
+
+export type StubZotero = ReturnType<typeof createStubZotero>;

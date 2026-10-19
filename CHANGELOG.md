@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Security — authenticated remote access
+
+- **Breaking:** removed the unauthenticated SSE transport and the
+  `supergateway` wrapper used by the Docker image. Neither checked inbound
+  credentials (`supergateway`'s `--header`/`--oauth2Bearer` only set
+  *response* headers).
+- New `--transport http`: native Streamable HTTP at `/mcp` with server-side
+  bearer-token authentication. Unauthenticated requests get `401` before any
+  MCP handling. The server refuses to start without `MCP_AUTH_TOKEN_HASHES`.
+- Tokens are stored server-side only as SHA-256 hashes (`label:hash[:ro|rw]`),
+  compared in constant time; tokens shorter than 32 characters, tokens in
+  query strings, and repeated `Authorization` headers are rejected.
+- Sessions are bound to the token that created them; other tokens get `404`.
+  Session cap (50), idle eviction (30 min) and 1 MiB body limit.
+- Read-only by default over HTTP: write tools are registered only when
+  `ZOTERO_MCP_ENABLE_WRITE=true` and the token is `rw`. stdio keeps write
+  tools unless `ZOTERO_MCP_ENABLE_WRITE=false`.
+- HTTP mode disables local filesystem lookups unless `ZOTERO_DATA_DIR` is set.
+- Zotero key parameters are validated as 8-character keys (A-Z, 0-9).
+- `npm run token:generate -- <label> [ro|rw]` prints a client token and the
+  matching server entry.
+- Docker image runs as the non-root `node` user, has a `/healthz`
+  `HEALTHCHECK`, honours `PORT`, and installs only lockfile dependencies.
+- Tool logic moved to `src/server.ts` (`createZoteroServer`); read tools keep
+  their names, parameters and output formats.
+- Tests: 84 → 153 (auth, tool registry/compatibility, HTTP end-to-end).
+
+### Earlier unreleased changes
+
 ### Added — Tools
 
 - `get_item` MCP tool — retrieve single item with full metadata (9 tools total)

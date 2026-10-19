@@ -8,9 +8,9 @@ Technical architecture of the zotero-mcp server.
 ┌─────────────────────────────────────────────────┐
 │  MCP Client (Claude Desktop / Code / other)     │
 └─────────────────┬───────────────────────────────┘
-                  │ stdio or SSE
+                  │ stdio, or authenticated HTTP (auth.ts + http.ts)
 ┌─────────────────▼───────────────────────────────┐
-│  index.ts — MCP Server                          │
+│  server.ts — createZoteroServer()               │
 │  ┌─────────────────────────────────────────┐    │
 │  │  9 Tool Handlers (Zod-validated params) │    │
 │  └──────────────────┬──────────────────────┘    │
@@ -42,14 +42,32 @@ Technical architecture of the zotero-mcp server.
 
 ## Modules
 
-### `index.ts` — MCP Server
+### `index.ts` — Entry point
 
-Entry point. Responsibilities:
 - Environment variable validation
 - ZoteroClient initialization
-- 9 tool definitions with Zod parameter schemas
-- Transport selection (stdio vs SSE)
-- SSE: HTTP server with session management
+- Transport selection (stdio vs http); http refuses to start without
+  `MCP_AUTH_TOKEN_HASHES`
+
+### `server.ts` — Tool registry
+
+- `createZoteroServer(zotero, { allowWrite, dataDir })` builds one McpServer
+- 6 read tools always; 3 write tools only when `allowWrite` is true
+- `zoteroKey` schema validates 8-character Zotero keys
+- `dataDir` undefined disables local filesystem lookups
+
+### `auth.ts` — Bearer-token authentication
+
+- Parses `MCP_AUTH_TOKEN_HASHES` (`label:sha256hex[:ro|rw]`)
+- Hashes the presented token and compares it in constant time with every entry
+- Rejects short (<32 chars), oversized, repeated or non-Bearer credentials
+
+### `http.ts` — Authenticated Streamable HTTP
+
+- Authenticates every `/mcp` request before reading its body or touching MCP
+- One McpServer per session, bound to the token label that created it
+- Session cap, idle eviction, body size limit, optional Host allowlist
+- `/healthz` is unauthenticated and returns only `ok`
 
 ### `zotero-api.ts` — ZoteroClient
 
@@ -78,21 +96,21 @@ Shared helper functions:
 Standard MCP transport. JSON-RPC messages over stdin/stdout.
 Used by Claude Code and Claude Desktop.
 
-### SSE (Server-Sent Events)
+### HTTP (authenticated Streamable HTTP)
 
-HTTP-based transport for remote/Docker deployments.
+Remote/Docker transport (`--transport http`). Clients send
+`Authorization: Bearer <token>` on every request.
 
 ```
-Client                     Server (port 3000)
-  │                            │
-  │── GET /sse ───────────────►│  New SSEServerTransport
-  │◄── SSE event stream ──────│  (sessionId assigned)
-  │                            │
-  │── POST /messages?sid=X ───►│  handlePostMessage()
-  │◄── SSE response ──────────│
+Client                                  Server (PORT, default 3000)
+  │── POST /mcp  (no/invalid token) ──────►│  401 + WWW-Authenticate
+  │── POST /mcp  initialize + token ──────►│  authenticate → new session
+  │◄── 200 + Mcp-Session-Id ──────────────│  (server per session)
+  │── POST/GET/DELETE /mcp + session ─────►│  same token required
 ```
 
-Multiple clients can connect simultaneously (session map).
+Write tools are registered only if `ZOTERO_MCP_ENABLE_WRITE=true` and the
+token entry is `rw`. The former unauthenticated SSE transport was removed.
 
 ## Data Flow: Local-First Strategy
 
@@ -109,7 +127,9 @@ Request
   └──────────────────┴─► Fetch from Zotero API (fallback)
 ```
 
-`ZOTERO_DATA_DIR` defaults to `~/Zotero`. The full-text cache is read from
+`ZOTERO_DATA_DIR` defaults to `~/Zotero` for stdio. Over HTTP, local
+lookups are disabled unless `ZOTERO_DATA_DIR` is set explicitly.
+The full-text cache is read from
 `.zotero-ft-cache` files inside each item's storage directory.
 
 ## Configuration Matrix
@@ -149,5 +169,13 @@ Request
 4. **Local-first file access** — When Zotero Desktop storage is available,
    reading files locally avoids API calls and base64 encoding overhead.
 
-5. **SSE over Streamable HTTP** — SSE transport is used for Docker compatibility.
-   The MCP SDK's SSEServerTransport provides a stable, well-tested implementation.
+5. **Authentication in-process** — The SDK's StreamableHTTPServerTransport is
+   wrapped by our own auth check instead of a stdio-to-HTTP gateway, so no
+   request reaches the MCP layer without a valid token.
+
+6. **Static bearer tokens, stored as hashes** — Codex and Claude both support
+   a fixed `Authorization: Bearer` header. The server keeps only SHA-256
+   hashes, so a leaked server configuration does not reveal usable tokens.
+
+7. **Read-only by default remotely** — Remote clients get the six read tools
+   unless writes are explicitly enabled for the server and the token.
