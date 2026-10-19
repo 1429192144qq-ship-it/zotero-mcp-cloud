@@ -7,18 +7,27 @@ npm paketi olarak dağıtılır: `npx -y zotero-mcp`
 
 ```
 src/
-├── index.ts          # MCP server: 9 tool tanımı, env kontrol, stdio + SSE transport
+├── index.ts          # Giriş noktası: env kontrol, transport seçimi (stdio / http)
+├── server.ts         # createZoteroServer(): 9 tool tanımı, yazma tool'ları opsiyonel
+├── auth.ts           # Bearer token doğrulama (SHA-256 hash, sabit zamanlı karşılaştırma)
+├── http.ts           # Kimlik doğrulamalı Streamable HTTP transport (/mcp, /healthz)
 ├── zotero-api.ts     # ZoteroClient sınıfı: rate limiting, tüm HTTP işlemleri
 ├── utils.ts          # Utility fonksiyonlar (escapeHtml, Markdown formatters)
-└── __tests__/        # Vitest unit testleri (84 test)
-    ├── helpers.ts        # Test yardımcıları (mock fetch, fixtures)
+└── __tests__/        # Vitest testleri (163 test)
+    ├── helpers.ts        # Test yardımcıları (mock fetch, fixtures, stub ZoteroClient)
     ├── utils.test.ts     # Utility fonksiyon testleri (39 test)
-    └── zotero-api.test.ts # ZoteroClient testleri (45 test)
+    ├── zotero-api.test.ts # ZoteroClient testleri (45 test)
+    ├── auth.test.ts      # Token doğrulama testleri (30 test)
+    ├── server.test.ts    # Tool kaydı, salt-okunur mod, uyumluluk (17 test)
+    └── http.test.ts      # HTTP uçtan uca kimlik doğrulama testleri (32 test)
+scripts/
+├── generate-token.mjs # İstemci token'ı + sunucu hash girdisi üretir (yerelde çalıştır)
+└── container-check.sh # Docker imaj kontrolü (CI; yalnızca geçici test token'ı)
 ```
 
 - `dist/` → TypeScript build çıktısı (git'e dahil değil)
 - `node_modules/` → bağımlılıklar (git'e dahil değil)
-- `Dockerfile` → Multi-stage Docker build (SSE transport)
+- `Dockerfile` → Multi-stage Docker build (kimlik doğrulamalı HTTP, non-root)
 - `docs/` → Teknik dokümanlar
 
 ## Teknoloji
@@ -26,7 +35,8 @@ src/
 - **Dil:** TypeScript (ES2022, Node16 modül)
 - **Çalışma zamanı:** Node.js >= 18 (built-in `fetch` kullanılır)
 - **Paket tipi:** ES modules (`"type": "module"`)
-- **Transport:** stdio (default) veya SSE (`--transport sse --port 3000`)
+- **Transport:** stdio (default) veya kimlik doğrulamalı HTTP (`--transport http --port 3000`).
+  Eski kimlik doğrulamasız SSE transport kaldırıldı.
 
 ## Bağımlılıklar
 
@@ -67,9 +77,22 @@ ZOTERO_LIBRARY_ID   — Zotero kullanıcı/grup kütüphane ID'si
 ZOTERO_DATA_DIR     — Local Zotero veri dizini (default: ~/Zotero)
 ZOTERO_LOCAL        — Zotero Desktop local API modu (default: false)
 ZOTERO_LIBRARY_TYPE — "user" (default) veya "group"
+ZOTERO_MCP_ENABLE_WRITE — "true"/"false" (http default false, stdio default true)
+MCP_ALLOWED_HOSTS   — http: Host header allowlist (virgülle ayrılmış)
+PORT                — http: dinleme portu (default 3000)
 ```
 
-Koda gömülü API key veya library ID **OLMAMALI**.
+**HTTP için zorunlu:**
+```
+MCP_AUTH_TOKEN_HASHES — label:sha256hex[:ro|rw] girdileri, virgülle ayrılmış
+```
+
+HTTP modu token olmadan **başlamaz**. Sunucu yalnızca token hash'ini saklar.
+Yazma tool'ları yalnızca `ZOTERO_MCP_ENABLE_WRITE=true` VE token `rw` ise
+kaydedilir. HTTP modunda `ZOTERO_DATA_DIR` açıkça verilmedikçe yerel dosya
+erişimi kapalıdır.
+
+Koda gömülü API key, library ID veya erişim token'ı **OLMAMALI**.
 
 ## Build & Test
 
@@ -78,19 +101,23 @@ Koda gömülü API key veya library ID **OLMAMALI**.
 npm run build          # tsc && chmod 755 dist/index.js
 
 # Unit testler
-npm test               # vitest run (84 test)
+npm test               # vitest run (163 test)
 
 # MCP Inspector ile test
 ZOTERO_API_KEY=xxx ZOTERO_LIBRARY_ID=yyy \
   npx @modelcontextprotocol/inspector dist/index.js
 
-# SSE transport testi
-ZOTERO_API_KEY=xxx ZOTERO_LIBRARY_ID=yyy \
-  node dist/index.js --transport sse --port 3000
+# Token üret (yerelde; çıktıyı commit etme)
+npm run token:generate -- dev ro
+
+# HTTP transport testi
+ZOTERO_API_KEY=xxx ZOTERO_LIBRARY_ID=yyy MCP_AUTH_TOKEN_HASHES="dev:<hash>:ro" \
+  node dist/index.js --transport http --port 3000
 
 # Docker build & run
 docker build -t zotero-mcp .
-docker run -p 3000:3000 -e ZOTERO_API_KEY=xxx -e ZOTERO_LIBRARY_ID=yyy zotero-mcp
+docker run -p 3000:3000 -e ZOTERO_API_KEY=xxx -e ZOTERO_LIBRARY_ID=yyy \
+  -e MCP_AUTH_TOKEN_HASHES="dev:<hash>:ro" zotero-mcp
 
 # Claude Code'a local ekle
 claude mcp add zotero-dev \
@@ -111,6 +138,8 @@ claude mcp add zotero-dev \
 
 - **console.log YASAK** — stdout MCP protokolüne ayrılmış, log için `console.error`
 - Tool handler'lar `try-catch` ile sarılır, hata → `{ isError: true }`
+- Zotero key parametreleri `zoteroKey` şeması ile doğrulanır (8 karakter, A-Z0-9)
+- Token veya Authorization header değerleri asla loglanmaz
 - HTML çıktıda kullanıcı girdisi `escapeHtml()` ile temizlenir
 - Tüm tipler `zotero-api.ts`'de tanımlı ve export edilir
 - Tool parametreleri `zod` şema ile tanımlanır

@@ -10,7 +10,8 @@ Zotero library directly from Claude (Desktop, Code, or any MCP-compatible client
 - **9 MCP tools** — collections, notes, search, item metadata, attachments, full text
 - **Zotero Local API** — connect to Zotero Desktop without an API key
 - **Group library support** — access group libraries in addition to user libraries
-- **SSE transport** — HTTP-based transport for Docker and remote access
+- **Authenticated remote access** — Streamable HTTP with server-side bearer-token
+  checks; read-only by default
 - **Docker ready** — multi-stage Dockerfile included
 - **LLM-optimized output** — Markdown-formatted results for `get_item` and `search_items`
 - **Local-first** — reads attachments and full text from local Zotero storage when available
@@ -67,17 +68,66 @@ claude mcp add zotero \
 
 Requires Zotero Desktop to be running (exposes API at `localhost:23119`).
 
-### Docker
+### Remote deployment (Docker, authenticated HTTP)
 
-```bash
-docker build -t zotero-mcp .
-docker run -p 3000:3000 \
-  -e ZOTERO_API_KEY=your_api_key \
-  -e ZOTERO_LIBRARY_ID=your_library_id \
-  zotero-mcp
-```
+The container serves authenticated Streamable HTTP at `/mcp` and **refuses to
+start without `MCP_AUTH_TOKEN_HASHES`**. It is read-only unless
+`ZOTERO_MCP_ENABLE_WRITE=true` *and* the client's token is `rw`.
 
-The container runs SSE transport on port 3000 by default.
+1. On your own machine, generate one token per client:
+
+   ```bash
+   npm run token:generate -- claude ro
+   npm run token:generate -- codex ro
+   ```
+
+   Each run prints a client token (give it to that client only) and a server
+   entry `label:sha256hex:ro`. The server stores only the hash.
+
+2. Run the container with the comma-joined server entries:
+
+   ```bash
+   docker build -t zotero-mcp .
+   docker run -p 3000:3000 \
+     -e ZOTERO_API_KEY=your_read_only_api_key \
+     -e ZOTERO_LIBRARY_ID=your_library_id \
+     -e MCP_AUTH_TOKEN_HASHES="claude:<hash>:ro,codex:<hash>:ro" \
+     zotero-mcp
+   ```
+
+3. Clients send `Authorization: Bearer <token>`:
+
+   - **Codex** (`~/.codex/config.toml`, token in an environment variable):
+
+     ```toml
+     [mcp_servers.zotero]
+     url = "https://<your-host>/mcp"
+     bearer_token_env_var = "ZOTERO_MCP_TOKEN"
+     ```
+
+   - **Claude Code CLI**:
+     `claude mcp add --transport http zotero https://<your-host>/mcp --header "Authorization: Bearer $ZOTERO_MCP_TOKEN"`
+   - **claude.ai web connector**: only if your organization offers the
+     "Request headers" option when adding a custom connector (see below).
+
+#### Client compatibility
+
+| Client | Static bearer token | Status |
+| ------ | ------------------- | ------ |
+| Codex | `bearer_token_env_var` in `config.toml` | Documented by Codex; not yet tested against a live deployment |
+| Claude Code CLI | `claude mcp add --header` | Documented by Claude Code; not yet tested against a live deployment |
+| claude.ai web / Desktop / mobile connector | Request headers (`static_headers`) | **Not verified.** Anthropic lists this as a beta available to a limited set of organizations; the option may be absent |
+
+If the claude.ai connector cannot send a request header, it **cannot use this
+server** — that is intended. Authentication stays mandatory; do not deploy an
+authless variant to make the web connector work. Use Codex or Claude Code
+instead, or add OAuth 2.1 as a separate change (protected resource metadata,
+an authorization server with DCR or CIMD and S256 PKCE, `401` with
+`WWW-Authenticate: Bearer resource_metadata=...`, tokens restricted to your
+own account).
+
+Requests without a valid token get `401`. Tokens in query strings are ignored.
+`GET /healthz` is unauthenticated and returns only `ok`.
 
 ## Environment Variables
 
@@ -88,6 +138,13 @@ The container runs SSE transport on port 3000 by default.
 | `ZOTERO_DATA_DIR`     | No       | Local Zotero data directory (default: `~/Zotero`)        |
 | `ZOTERO_LOCAL`        | No       | Connect to Zotero Desktop local API (default: `false`)   |
 | `ZOTERO_LIBRARY_TYPE` | No       | `user` (default) or `group`                              |
+| `MCP_AUTH_TOKEN_HASHES` | http: Yes | `label:sha256hex[:ro\|rw]` entries, comma-separated     |
+| `ZOTERO_MCP_ENABLE_WRITE` | No     | `true`/`false`; default `false` for http, `true` for stdio |
+| `MCP_ALLOWED_HOSTS`   | No       | http: comma-separated `Host` header allowlist            |
+| `PORT`                | No       | http: listen port (default `3000`; `--port` overrides)   |
+
+In http mode, local file access is disabled unless `ZOTERO_DATA_DIR` is set
+explicitly.
 
 ## Transport
 
@@ -96,10 +153,11 @@ The server supports two transport modes:
 | Mode  | Command                                        | Description                     |
 | ----- | ---------------------------------------------- | ------------------------------- |
 | stdio | `node dist/index.js` (default)                 | JSON-RPC over stdin/stdout      |
-| SSE   | `node dist/index.js --transport sse --port 3000` | HTTP Server-Sent Events       |
+| http  | `node dist/index.js --transport http --port 3000` | Authenticated Streamable HTTP |
 
 **stdio** is the default and works with Claude Code/Desktop.
-**SSE** is useful for Docker, remote access, and multi-client scenarios.
+**http** is for Docker and remote access; it requires `MCP_AUTH_TOKEN_HASHES`.
+The former unauthenticated SSE transport was removed.
 
 ## Available Tools
 
@@ -205,7 +263,7 @@ git clone https://github.com/isezen/zotero-mcp.git
 cd zotero-mcp
 npm install
 npm run build
-npm test              # 84 unit tests (Vitest)
+npm test              # 163 tests (Vitest)
 ```
 
 ### Test with MCP Inspector
@@ -215,11 +273,12 @@ ZOTERO_API_KEY=your_key ZOTERO_LIBRARY_ID=your_id \
   npx @modelcontextprotocol/inspector dist/index.js
 ```
 
-### Test SSE transport
+### Test the HTTP transport
 
 ```bash
 ZOTERO_API_KEY=your_key ZOTERO_LIBRARY_ID=your_id \
-  node dist/index.js --transport sse --port 3000
+MCP_AUTH_TOKEN_HASHES="dev:<hash>:ro" \
+  node dist/index.js --transport http --port 3000
 ```
 
 ### Test locally with Claude Code
