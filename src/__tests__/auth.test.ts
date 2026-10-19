@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   MIN_TOKEN_LENGTH,
   authenticate,
+  authorizationHeaderValues,
   extractBearerToken,
   hashToken,
   parseTokenHashes,
@@ -78,6 +79,23 @@ describe("parseTokenHashes", () => {
     } catch (error) {
       expect((error as Error).message).not.toContain(hashA);
     }
+  });
+});
+
+describe("authorizationHeaderValues", () => {
+  it("returns every Authorization value regardless of name casing", () => {
+    expect(
+      authorizationHeaderValues([
+        "Host", "example",
+        "Authorization", "Bearer first",
+        "Accept", "*/*",
+        "authorization", "Bearer second",
+      ]),
+    ).toEqual(["Bearer first", "Bearer second"]);
+  });
+
+  it("returns an empty list when the header is absent", () => {
+    expect(authorizationHeaderValues(["Host", "example"])).toEqual([]);
   });
 });
 

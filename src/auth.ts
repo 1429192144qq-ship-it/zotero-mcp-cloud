@@ -90,6 +90,21 @@ export function parseTokenHashes(raw: string | undefined): TokenEntry[] {
 }
 
 /**
+ * All Authorization header values exactly as received, in order.
+ *
+ * Node keeps only the first value of a repeated Authorization header in
+ * `req.headers`, so duplicates must be detected from `req.rawHeaders`
+ * (a flat [name, value, name, value, ...] list with original casing).
+ */
+export function authorizationHeaderValues(rawHeaders: readonly string[]): string[] {
+  const values: string[] = [];
+  for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
+    if (rawHeaders[i].toLowerCase() === "authorization") values.push(rawHeaders[i + 1]);
+  }
+  return values;
+}
+
+/**
  * Extract a bearer token from an Authorization header value.
  * Returns null for missing, repeated, malformed, or out-of-range tokens.
  */

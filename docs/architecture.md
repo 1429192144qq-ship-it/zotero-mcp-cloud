@@ -173,9 +173,12 @@ The full-text cache is read from
    wrapped by our own auth check instead of a stdio-to-HTTP gateway, so no
    request reaches the MCP layer without a valid token.
 
-6. **Static bearer tokens, stored as hashes** — Codex and Claude both support
-   a fixed `Authorization: Bearer` header. The server keeps only SHA-256
-   hashes, so a leaked server configuration does not reveal usable tokens.
+6. **Static bearer tokens, stored as hashes** — Codex and Claude Code can
+   send a fixed `Authorization: Bearer` header; the claude.ai web connector
+   can only if its beta request-header option is available (unverified).
+   The server keeps only SHA-256 hashes, so a leaked server configuration
+   does not reveal usable tokens. Clients that cannot send the header are
+   refused, never served anonymously.
 
 7. **Read-only by default remotely** — Remote clients get the six read tools
    unless writes are explicitly enabled for the server and the token.

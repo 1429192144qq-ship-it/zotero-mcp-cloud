@@ -5,7 +5,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -59,6 +59,46 @@ async function start(overrides: Partial<HttpServerOptions> = {}) {
   await new Promise<void>((resolve) => httpServer!.listen(0, "127.0.0.1", resolve));
   const { port } = httpServer.address() as AddressInfo;
   return { base: `http://127.0.0.1:${port}`, factory };
+}
+
+/**
+ * Send a hand-written HTTP/1.1 request over a raw socket. fetch() merges
+ * repeated headers into one, so duplicate-header cases need this.
+ */
+function rawPost(
+  base: string,
+  headerLines: string[],
+  body: unknown,
+): Promise<{ status: number; head: string }> {
+  const { hostname, port } = new URL(base);
+  const payload = JSON.stringify(body);
+  const request = [
+    "POST /mcp HTTP/1.1",
+    `Host: ${hostname}:${port}`,
+    "Content-Type: application/json",
+    "Accept: application/json, text/event-stream",
+    ...headerLines,
+    `Content-Length: ${Buffer.byteLength(payload)}`,
+    "Connection: close",
+    "",
+    payload,
+  ].join("\r\n");
+  return new Promise((resolve, reject) => {
+    const socket = connect(Number(port), hostname, () => socket.write(request));
+    // Resolve once the status line and headers have arrived: a successful
+    // MCP response is an SSE stream that does not end on its own.
+    let data = "";
+    socket.on("data", (chunk) => {
+      data += chunk;
+      const end = data.indexOf("\r\n\r\n");
+      if (end !== -1) {
+        const head = data.slice(0, end);
+        socket.destroy();
+        resolve({ status: Number(head.split(" ")[1]), head });
+      }
+    });
+    socket.on("error", reject);
+  });
 }
 
 async function connectClient(base: string, token: string) {
@@ -157,6 +197,48 @@ describe("authentication", () => {
       body: JSON.stringify(INIT_BODY),
     });
     expect(res.status).toBe(401);
+  });
+
+  describe("repeated Authorization headers (raw HTTP)", () => {
+    const other = randomBytes(32).toString("base64url");
+
+    it("accepts a single valid header sent over a raw socket (control)", async () => {
+      const { base } = await start();
+      const res = await rawPost(base, [`Authorization: Bearer ${roToken}`], INIT_BODY);
+      expect(res.status).toBe(200);
+      expect(res.head.toLowerCase()).toContain("mcp-session-id:");
+    });
+
+    it.each([
+      ["valid first, unknown second", [`Authorization: Bearer ${roToken}`, `Authorization: Bearer ${other}`]],
+      ["valid first, garbage second", [`Authorization: Bearer ${roToken}`, "Authorization: x"]],
+      ["the same valid token twice", [`Authorization: Bearer ${roToken}`, `Authorization: Bearer ${roToken}`]],
+      ["two valid tokens", [`Authorization: Bearer ${roToken}`, `Authorization: Bearer ${rwToken}`]],
+      ["different name casing", [`Authorization: Bearer ${roToken}`, `authorization: Bearer ${roToken}`]],
+      ["comma-joined values in one header", [`Authorization: Bearer ${roToken}, Bearer ${other}`]],
+    ])("rejects initialize with %s", async (_name, lines) => {
+      const { base, factory } = await start();
+      const res = await rawPost(base, lines, INIT_BODY);
+      expect(res.status).toBe(401);
+      expect(res.head.toLowerCase()).not.toContain("mcp-session-id:");
+      expect(factory).not.toHaveBeenCalled();
+    });
+
+    it("rejects duplicates on an established session", async () => {
+      const { base } = await start();
+      const { transport } = await connectClient(base, roToken);
+      const res = await rawPost(
+        base,
+        [
+          `mcp-session-id: ${transport.sessionId}`,
+          "mcp-protocol-version: 2025-03-26",
+          `Authorization: Bearer ${roToken}`,
+          `Authorization: Bearer ${other}`,
+        ],
+        { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      );
+      expect(res.status).toBe(401);
+    });
   });
 
   it("logs rejections without credentials", async () => {

@@ -24,7 +24,11 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { authenticate, type TokenEntry } from "./auth.js";
+import {
+  authenticate,
+  authorizationHeaderValues,
+  type TokenEntry,
+} from "./auth.js";
 
 export interface HttpServerOptions {
   /** Accepted tokens. Must be non-empty. */
@@ -207,7 +211,13 @@ export function createHttpServer(options: HttpServerOptions): Server {
         return;
       }
 
-      const client = authenticate(req.headers.authorization, tokens);
+      // Use rawHeaders: req.headers keeps only the first of repeated
+      // Authorization headers, which would hide a duplicate.
+      const authValues = authorizationHeaderValues(req.rawHeaders);
+      const client = authenticate(
+        authValues.length === 1 ? authValues[0] : authValues,
+        tokens,
+      );
       if (!client) {
         log(`[auth] rejected ${req.method} ${url.pathname}`);
         sendJsonRpcError(res, 401, -32001, "Unauthorized", {

@@ -20,3 +20,15 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+
+  container:
+    # Builds the real Dockerfile and runs it with a throwaway token and a
+    # placeholder Zotero key only. No secrets are used.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t zotero-mcp:ci .
+      - name: Container checks (startup, health, auth, read-only)
+        run: bash scripts/container-check.sh zotero-mcp:ci 3999

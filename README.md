@@ -107,9 +107,24 @@ start without `MCP_AUTH_TOKEN_HASHES`**. It is read-only unless
 
    - **Claude Code CLI**:
      `claude mcp add --transport http zotero https://<your-host>/mcp --header "Authorization: Bearer $ZOTERO_MCP_TOKEN"`
-   - **claude.ai custom connector**: add a request header `Authorization` with
-     value `Bearer <token>` (requires the "Request headers" option for your
-     organization).
+   - **claude.ai web connector**: only if your organization offers the
+     "Request headers" option when adding a custom connector (see below).
+
+#### Client compatibility
+
+| Client | Static bearer token | Status |
+| ------ | ------------------- | ------ |
+| Codex | `bearer_token_env_var` in `config.toml` | Documented by Codex; not yet tested against a live deployment |
+| Claude Code CLI | `claude mcp add --header` | Documented by Claude Code; not yet tested against a live deployment |
+| claude.ai web / Desktop / mobile connector | Request headers (`static_headers`) | **Not verified.** Anthropic lists this as a beta available to a limited set of organizations; the option may be absent |
+
+If the claude.ai connector cannot send a request header, it **cannot use this
+server** — that is intended. Authentication stays mandatory; do not deploy an
+authless variant to make the web connector work. Use Codex or Claude Code
+instead, or add OAuth 2.1 as a separate change (protected resource metadata,
+an authorization server with DCR or CIMD and S256 PKCE, `401` with
+`WWW-Authenticate: Bearer resource_metadata=...`, tokens restricted to your
+own account).
 
 Requests without a valid token get `401`. Tokens in query strings are ignored.
 `GET /healthz` is unauthenticated and returns only `ok`.
@@ -248,7 +263,7 @@ git clone https://github.com/isezen/zotero-mcp.git
 cd zotero-mcp
 npm install
 npm run build
-npm test              # 153 tests (Vitest)
+npm test              # 163 tests (Vitest)
 ```
 
 ### Test with MCP Inspector

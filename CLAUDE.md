@@ -13,15 +13,16 @@ src/
 ├── http.ts           # Kimlik doğrulamalı Streamable HTTP transport (/mcp, /healthz)
 ├── zotero-api.ts     # ZoteroClient sınıfı: rate limiting, tüm HTTP işlemleri
 ├── utils.ts          # Utility fonksiyonlar (escapeHtml, Markdown formatters)
-└── __tests__/        # Vitest testleri (153 test)
+└── __tests__/        # Vitest testleri (163 test)
     ├── helpers.ts        # Test yardımcıları (mock fetch, fixtures, stub ZoteroClient)
     ├── utils.test.ts     # Utility fonksiyon testleri (39 test)
     ├── zotero-api.test.ts # ZoteroClient testleri (45 test)
-    ├── auth.test.ts      # Token doğrulama testleri (28 test)
+    ├── auth.test.ts      # Token doğrulama testleri (30 test)
     ├── server.test.ts    # Tool kaydı, salt-okunur mod, uyumluluk (17 test)
-    └── http.test.ts      # HTTP uçtan uca kimlik doğrulama testleri (24 test)
+    └── http.test.ts      # HTTP uçtan uca kimlik doğrulama testleri (32 test)
 scripts/
-└── generate-token.mjs # İstemci token'ı + sunucu hash girdisi üretir (yerelde çalıştır)
+├── generate-token.mjs # İstemci token'ı + sunucu hash girdisi üretir (yerelde çalıştır)
+└── container-check.sh # Docker imaj kontrolü (CI; yalnızca geçici test token'ı)
 ```
 
 - `dist/` → TypeScript build çıktısı (git'e dahil değil)
@@ -100,7 +101,7 @@ Koda gömülü API key, library ID veya erişim token'ı **OLMAMALI**.
 npm run build          # tsc && chmod 755 dist/index.js
 
 # Unit testler
-npm test               # vitest run (153 test)
+npm test               # vitest run (163 test)
 
 # MCP Inspector ile test
 ZOTERO_API_KEY=xxx ZOTERO_LIBRARY_ID=yyy \

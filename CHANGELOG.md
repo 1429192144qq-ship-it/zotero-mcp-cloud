@@ -27,7 +27,17 @@
   `HEALTHCHECK`, honours `PORT`, and installs only lockfile dependencies.
 - Tool logic moved to `src/server.ts` (`createZoteroServer`); read tools keep
   their names, parameters and output formats.
-- Tests: 84 → 153 (auth, tool registry/compatibility, HTTP end-to-end).
+- Repeated `Authorization` headers are detected from `req.rawHeaders` (Node
+  keeps only the first value in `req.headers`) and rejected even when the
+  first token is valid.
+- CI `container` job builds the real Dockerfile and runs
+  `scripts/container-check.sh` with throwaway credentials: refuses to start
+  without auth config, HEALTHCHECK healthy, `401` for unauthenticated and
+  duplicate-header requests, write tools refused in read-only mode.
+- README client-compatibility table: claude.ai web connector header support
+  is unverified; no authless fallback.
+- Tests: 84 → 163 (auth, tool registry/compatibility, HTTP end-to-end,
+  raw-socket duplicate-header cases).
 
 ### Earlier unreleased changes
 
