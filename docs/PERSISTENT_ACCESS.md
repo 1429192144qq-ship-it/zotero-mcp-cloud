@@ -45,7 +45,7 @@ The local parser smoke test used an existing private PDF without another cloud d
 
 ## Current OAuth interoperability status
 
-This implements a resource server, not an end-to-end Auth0 login or token-renewal service. The real tenant's issuer/discovery, PKCE metadata, client registration, callback allowlist, resource-to-audience mapping, grants and account consent have not been validated. No live client login, refresh or new-conversation persistence has passed.
+This implements a resource server, not an end-to-end Auth0 login or token-renewal service. Public discovery and local verifier tests do not validate client registration, callback allowlists, resource-to-audience mapping, tenant grants or account consent. No live client login, refresh or new-conversation persistence has passed. Tenant-specific findings and private test samples are retained outside the public repository.
 
 Before deployment, confirm the selected client's supported registration path and copy its exact callback from its management UI. Do not assume a fixed historical ChatGPT callback. Validate the real authorization-code exchange and an actual refresh after expiry. Auth0 may issue a userinfo-audience token when receiving only an MCP `resource` parameter; our verifier must continue rejecting that token. Resolve the tenant's documented audience mapping without weakening audience checks or changing tenant-wide defaults automatically.
 
