@@ -36,6 +36,7 @@ export const READ_TOOLS = [
   "get_item_attachments",
   "get_item_fulltext",
   "read_attachment",
+  "read_pdf",
 ] as const;
 
 /**
@@ -118,7 +119,7 @@ export function createZoteroServer(
       } catch (error) {
         return {
           content: [
-            { type: "text" as const, text: `Error: ${(error as Error).message}` },
+            { type: "text" as const, text: "Zotero operation failed; details suppressed to protect credentials; cloud status unconfirmed" },
           ],
           isError: true,
         };
@@ -178,7 +179,7 @@ export function createZoteroServer(
         } catch (error) {
           return {
             content: [
-              { type: "text" as const, text: `Error: ${(error as Error).message}` },
+              { type: "text" as const, text: "Zotero operation failed; details suppressed to protect credentials; cloud status unconfirmed" },
             ],
             isError: true,
           };
@@ -266,7 +267,7 @@ export function createZoteroServer(
         } catch (error) {
           return {
             content: [
-              { type: "text" as const, text: `Error: ${(error as Error).message}` },
+              { type: "text" as const, text: "Zotero operation failed; details suppressed to protect credentials; cloud status unconfirmed" },
             ],
             isError: true,
           };
@@ -323,7 +324,7 @@ export function createZoteroServer(
         } catch (error) {
           return {
             content: [
-              { type: "text" as const, text: `Error: ${(error as Error).message}` },
+              { type: "text" as const, text: "Zotero operation failed; details suppressed to protect credentials; cloud status unconfirmed" },
             ],
             isError: true,
           };
@@ -354,7 +355,7 @@ export function createZoteroServer(
       } catch (error) {
         return {
           content: [
-            { type: "text" as const, text: `Error: ${(error as Error).message}` },
+            { type: "text" as const, text: "Zotero operation failed; details suppressed to protect credentials; cloud status unconfirmed" },
           ],
           isError: true,
         };
@@ -436,7 +437,7 @@ export function createZoteroServer(
       } catch (error) {
         return {
           content: [
-            { type: "text" as const, text: `Error: ${(error as Error).message}` },
+            { type: "text" as const, text: "Zotero operation failed; details suppressed to protect credentials; cloud status unconfirmed" },
           ],
           isError: true,
         };
@@ -524,7 +525,7 @@ export function createZoteroServer(
       } catch (error) {
         return {
           content: [
-            { type: "text" as const, text: `Error: ${(error as Error).message}` },
+            { type: "text" as const, text: "Zotero operation failed; details suppressed to protect credentials; cloud status unconfirmed" },
           ],
           isError: true,
         };
@@ -641,7 +642,7 @@ export function createZoteroServer(
       } catch (error) {
         return {
           content: [
-            { type: "text" as const, text: `Error: ${(error as Error).message}` },
+            { type: "text" as const, text: "Zotero operation failed; details suppressed to protect credentials; cloud status unconfirmed" },
           ],
           isError: true,
         };
@@ -777,13 +778,24 @@ export function createZoteroServer(
       } catch (error) {
         return {
           content: [
-            { type: "text" as const, text: `Error: ${(error as Error).message}` },
+            { type: "text" as const, text: "Zotero operation failed; details suppressed to protect credentials; cloud status unconfirmed" },
           ],
           isError: true,
         };
       }
     },
   );
+
+  server.tool("read_pdf", "Download and parse a cloud PDF into bounded page text; never returns base64. An empty text result may need OCR.",
+    { attachmentKey: zoteroKey, startPage: z.number().int().min(1).default(1), maxPages: z.number().int().min(1).max(20).default(5) },
+    async ({attachmentKey,startPage,maxPages}) => {
+      try {
+        const {readPdf} = await import("./pdf-reader.js");
+        const downloaded = await zotero.downloadAttachment(attachmentKey);
+        const result = await readPdf(Buffer.from(downloaded.data,"base64"),startPage,maxPages);
+        return {content:[{type:"text" as const,text:JSON.stringify({attachmentKey,source:"cloud_pdf",...result})}]};
+      } catch { return {isError:true,content:[{type:"text" as const,text:"Cloud PDF download/parse failed; cloud synchronization remains unconfirmed"}]}; }
+    });
 
   return server;
 }

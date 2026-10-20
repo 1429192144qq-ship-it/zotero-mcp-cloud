@@ -220,7 +220,7 @@ export class ZoteroClient {
     if (response.ok) return;
 
     const status = response.status;
-    const body = await response.text().catch(() => "");
+    await response.body?.cancel().catch(() => undefined);
 
     const messages: Record<number, string> = {
       400: "Bad request — check parameters",
@@ -234,7 +234,7 @@ export class ZoteroClient {
     };
 
     const msg = messages[status] ?? `HTTP ${status}`;
-    throw new Error(`${context}: ${msg}${body ? ` — ${body}` : ""}`);
+    throw new Error(`${context}: ${msg}`);
   }
 
   private sleep(ms: number): Promise<void> {
@@ -378,11 +378,27 @@ export class ZoteroClient {
     itemKey: string,
   ): Promise<{ data: string; contentType: string; filename: string }> {
     const url = `${this.userPrefix}/items/${itemKey}/file`;
-    const response = await this.rateLimitedFetch(url, {
-      headers: this.headers(),
-    });
-
-    await this.throwOnError(response, `downloadAttachment(${itemKey})`);
+    let current = new URL(url);
+    let response: Response | undefined;
+    for (let hop = 0; hop <= 5; hop++) {
+      if (!this.isLocal && (current.protocol !== "https:" || current.port && current.port !== "443" || current.username || current.password ||
+          !["api.zotero.org", "zotero.org"].includes(current.hostname) && !current.hostname.endsWith(".amazonaws.com") && !current.hostname.endsWith(".cloudfront.net"))) {
+        throw new Error("Attachment redirect blocked by credential boundary");
+      }
+      response = await this.rateLimitedFetch(current.href, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(180_000),
+        headers: hop === 0 ? this.headers({"Accept-Encoding":"identity"}) : {"Accept-Encoding":"identity"},
+      });
+      if (![301,302,303,307,308].includes(response.status)) break;
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (!location || hop === 5) throw new Error("Attachment redirect unavailable or limit exceeded");
+      current = new URL(location, current);
+      if (this.apiKey && current.href.includes(this.apiKey)) throw new Error("Unsafe attachment redirect");
+    }
+    if (!response) throw new Error("Attachment response unavailable");
+    await this.throwOnError(response, "downloadAttachment");
 
     const contentType =
       response.headers.get("Content-Type") ?? "application/octet-stream";
@@ -390,8 +406,21 @@ export class ZoteroClient {
     const filenameMatch = disposition.match(/filename="?([^";\n]+)"?/);
     const filename = filenameMatch?.[1] ?? `${itemKey}.bin`;
 
-    const buffer = await response.arrayBuffer();
-    const data = Buffer.from(buffer).toString("base64");
+    if (!response.body) throw new Error("Attachment body unavailable");
+    const chunks: Uint8Array[] = []; let size = 0;
+    const reader = response.body.getReader();
+    try {
+      while (true) {
+        const {done,value} = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 64 * 1024 * 1024) throw new Error("Attachment exceeds 64 MiB read limit");
+        chunks.push(value);
+      }
+    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+    const expected = response.headers.get("content-length");
+    if (expected !== null && Number(expected) !== size) throw new Error("Attachment incomplete; cloud status unconfirmed");
+    const data = Buffer.concat(chunks).toString("base64");
 
     return { data, contentType, filename };
   }

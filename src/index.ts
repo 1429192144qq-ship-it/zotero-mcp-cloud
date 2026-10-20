@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { oauthFromEnv } from "./oauth.js";
 
 /**
  * Zotero MCP Server
@@ -144,7 +145,8 @@ async function main(): Promise<void> {
     console.error(`Error: ${(error as Error).message}`);
     process.exit(1);
   }
-  if (tokens.length === 0) {
+  const oauth = oauthFromEnv(process.env);
+  if (tokens.length === 0 && !oauth) {
     console.error(
       "Error: refusing to start the HTTP transport without authentication.\n" +
         "  Set MCP_AUTH_TOKEN_HASHES (generate entries with `npm run token:generate -- <label>`).",
@@ -160,6 +162,7 @@ async function main(): Promise<void> {
 
   const httpServer = createHttpServer({
     tokens,
+    oauth,
     enableWrite,
     allowedHosts,
     createMcpServer: ({ allowWrite }) =>
@@ -175,6 +178,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error("Fatal error:", error);
+  console.error("Fatal startup error; details suppressed to protect credentials");
   process.exit(1);
 });

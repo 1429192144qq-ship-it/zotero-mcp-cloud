@@ -96,6 +96,7 @@ describe("tool registration", () => {
       get_item_attachments: ["forceRemote", "itemKey"],
       get_item_fulltext: ["forceRemote", "itemKey"],
       read_attachment: ["forceRemote", "itemKey"],
+      read_pdf: ["attachmentKey", "maxPages", "startPage"],
     });
   });
 });
