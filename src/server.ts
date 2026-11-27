@@ -14,18 +14,29 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { AttachmentInfo, ZoteroClient } from "./zotero-api.js";
+import { ArchiveError, MAX_ARCHIVE_PDF_BYTES, type AttachmentInfo, type ZoteroClient } from "./zotero-api.js";
 import {
   escapeHtml,
   formatItemMarkdown,
   formatItemSummary,
 } from "./utils.js";
 
-/** Tool names that modify the Zotero library. */
+/** Archive capability and mutations are available only to write sessions. */
+export const ARCHIVE_TOOLS = [
+  "check_archive_permissions",
+  "create_bibliography",
+  "edit_bibliography",
+  "set_literature_number_tag",
+  "set_archive_location",
+  "upload_archive_pdf",
+] as const;
+
+/** Tool names available to a write session using the remote API. */
 export const WRITE_TOOLS = [
   "create_collection",
   "create_note",
   "add_note_to_collection",
+  ...ARCHIVE_TOOLS,
 ] as const;
 
 /** Tool names that only read from the Zotero library. */
@@ -46,6 +57,75 @@ export const READ_TOOLS = [
 export const zoteroKey = z
   .string()
   .regex(/^[A-Z0-9]{8}$/, "Expected an 8-character Zotero key (A-Z, 0-9)");
+
+const textField = z.string().max(32_000);
+const bibliographyFields = z.object({
+  title: textField.trim().min(1).optional(),
+  abstractNote: textField.optional(),
+  date: textField.optional(),
+  DOI: textField.optional(),
+  url: textField.optional(),
+  publicationTitle: textField.optional(),
+  bookTitle: textField.optional(),
+  proceedingsTitle: textField.optional(),
+  publisher: textField.optional(),
+  university: textField.optional(),
+  institution: textField.optional(),
+  repository: textField.optional(),
+  volume: textField.optional(),
+  issue: textField.optional(),
+  pages: textField.optional(),
+  ISBN: textField.optional(),
+  ISSN: textField.optional(),
+  language: textField.optional(),
+  extra: textField.optional(),
+  creators: z.array(z.object({
+    creatorType: z.string().min(1).max(64),
+    firstName: textField.optional(),
+    lastName: textField.optional(),
+    name: textField.optional(),
+  }).strict()).max(100).optional(),
+}).strict();
+const itemVersion = z.number().int().positive();
+const literatureId = z.string().regex(/^(?!0+$)[0-9]{3,9}$/);
+const numberFields = { itemKey: zoteroKey, version: itemVersion, literatureId };
+const pdfBase64 = z.string().min(8).max(Math.ceil(MAX_ARCHIVE_PDF_BYTES / 3) * 4);
+
+async function archiveResult(operation: () => Promise<Record<string, unknown>>) {
+  try {
+    const result = await operation();
+    return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result };
+  } catch (error) {
+    const text = error instanceof ArchiveError ? error.message
+      : "Zotero archive operation failed; cloud status is unconfirmed.";
+    return { content: [{ type: "text" as const, text }], isError: true as const };
+  }
+}
+
+function registerArchiveTools(server: McpServer, zotero: ZoteroClient) {
+  server.tool("check_archive_permissions", "Read the server's Zotero API-key write grant for this library. Does not write.", {},
+    () => archiveResult(() => zotero.archiveAccess()));
+  server.tool("create_bibliography", "Create a parent bibliography record after checking for duplicates.", {
+    itemType: z.enum(["journalArticle", "book", "bookSection", "conferencePaper", "thesis", "report", "preprint", "webpage"]),
+    fields: bibliographyFields.extend({ title: textField.trim().min(1) }),
+    writeToken: z.string().regex(/^[a-f0-9]{32}$/).describe("Generate a UUID hex value once and reuse it for a retry."),
+  }, ({ itemType, fields, writeToken }) => archiveResult(() => zotero.createBibliography(itemType, fields, writeToken)));
+  server.tool("edit_bibliography", "Patch selected bibliography fields using the version returned by get_item.", {
+    itemKey: zoteroKey, version: itemVersion,
+    fields: bibliographyFields.refine((value) => Object.keys(value).length > 0, "Provide at least one field."),
+  }, ({ itemKey, version, fields }) => archiveResult(() => zotero.editBibliography(itemKey, version, fields)));
+  server.tool("set_literature_number_tag", "Set the canonical permanent-number tag after registry publication.", numberFields,
+    ({ itemKey, version, literatureId }) => archiveResult(() => zotero.setLiteratureNumberTag(itemKey, version, literatureId)));
+  server.tool("set_archive_location", "Set archiveLocation to the published permanent number.", numberFields,
+    ({ itemKey, version, literatureId }) => archiveResult(() => zotero.setArchiveLocation(itemKey, version, literatureId)));
+  server.tool("upload_archive_pdf", "Upload and read back the numbered PDF on a parent with matching permanent-number fields.", {
+    parentKey: zoteroKey, literatureId, pdfBase64,
+  }, ({ parentKey, literatureId, pdfBase64 }) => archiveResult(() => {
+    const bytes = Buffer.from(pdfBase64, "base64");
+    if (bytes.toString("base64") !== pdfBase64) throw new ArchiveError("Invalid PDF base64.");
+    return zotero.uploadArchivePdf(parentKey, literatureId, bytes);
+  }));
+}
 
 export interface ZoteroServerOptions {
   /** Register write tools. Default: false (read-only). */
@@ -68,6 +148,10 @@ export function createZoteroServer(
     name: "zotero-mcp",
     version: "1.0.0",
   });
+
+  if (allowWrite && zotero.supportsArchive !== false) {
+    registerArchiveTools(server, zotero);
+  }
 
   // ---------------------------------------------------------------------------
   // Tool 1: list_collections
@@ -351,6 +435,10 @@ export function createZoteroServer(
           content: [
             { type: "text" as const, text: formatItemMarkdown(item.data) },
           ],
+          structuredContent: {
+            itemKey: item.key, version: item.version, archiveLocation: item.data.archiveLocation ?? "",
+            tags: item.data.tags ?? [],
+          },
         };
       } catch (error) {
         return {

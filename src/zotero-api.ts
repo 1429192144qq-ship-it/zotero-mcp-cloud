@@ -8,11 +8,21 @@
  * @see https://www.zotero.org/support/dev/web_api/v3/basics
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+export const MAX_ARCHIVE_PDF_BYTES = 16 * 1024 * 1024;
+
+export class ArchiveError extends Error {}
+
+type UploadAuthorization =
+  | { exists: 1 }
+  | { url: string; uploadKey: string; contentType: string; prefix: string; suffix: string };
+
+type ArchiveAccess = { library?: boolean; write?: boolean; files?: boolean };
 
 export interface ZoteroConfig {
   apiKey: string;
@@ -322,6 +332,241 @@ export class ZoteroClient {
 
     await this.throwOnError(response, "createNote");
     return (await response.json()) as ZoteroWriteResponse;
+  }
+
+  get supportsArchive(): boolean {
+    return !this.isLocal;
+  }
+
+  /** Inspect the effective API-key grant without mutating the target library. */
+  async archiveAccess(): Promise<{ libraryWrite: boolean; fileWrite: boolean; maxPdfBytes: number }> {
+    const response = await this.rateLimitedFetch(`${this.baseUrl}/keys/current`, {
+      headers: this.headers(),
+      redirect: "error",
+    });
+    await this.throwOnError(response, "archiveAccess");
+    const key = await response.json() as {
+      userID?: number;
+      access?: { user?: ArchiveAccess; groups?: Record<string, ArchiveAccess> };
+    };
+    const access = this.libraryType === "user"
+      ? (String(key.userID) === this.libraryId ? key.access?.user : undefined)
+      : key.access?.groups?.[this.libraryId] ?? key.access?.groups?.all;
+    let libraryWrite = access?.library === true && access.write === true;
+    let fileWrite = libraryWrite && access?.files === true;
+    if (libraryWrite && this.libraryType === "group") {
+      const response = await this.rateLimitedFetch(this.userPrefix, {
+        headers: this.headers(),
+        redirect: "error",
+      });
+      await this.throwOnError(response, "archive group permissions");
+      const group = (await response.json() as {
+        data: { owner: number; admins?: number[]; members?: number[]; libraryEditing: string; fileEditing: string };
+      }).data;
+      const admin = key.userID === group.owner || group.admins?.includes(key.userID ?? -1);
+      const member = group.members?.includes(key.userID ?? -1);
+      libraryWrite = Boolean(admin || (member && group.libraryEditing === "members"));
+      fileWrite = libraryWrite &&
+        (group.fileEditing === "members" || (Boolean(admin) && group.fileEditing === "admins"));
+    }
+    return { libraryWrite, fileWrite, maxPdfBytes: MAX_ARCHIVE_PDF_BYTES };
+  }
+
+  private async createArchiveItem(data: Record<string, unknown>, writeToken: string): Promise<ZoteroItem> {
+    const response = await this.rateLimitedFetch(`${this.userPrefix}/items`, {
+      method: "POST",
+      redirect: "error",
+      headers: this.headers({ "Zotero-Write-Token": writeToken }),
+      body: JSON.stringify([data]),
+    });
+    if (response.status === 412) {
+      await response.body?.cancel();
+      throw new ArchiveError("Write token was already accepted. Find the existing item before retrying.");
+    }
+    await this.throwOnError(response, "createArchiveItem");
+    const result = await response.json() as {
+      successful?: Record<string, ZoteroItem>;
+      failed?: Record<string, { code: number }>;
+    };
+    const created = result.successful?.["0"];
+    if (!created || !/^[A-Z0-9]{8}$/.test(created.key)) {
+      const code = result.failed?.["0"]?.code;
+      throw new ArchiveError(`Zotero did not create the item${Number.isInteger(code) ? ` (code ${code})` : ""}.`);
+    }
+    return created;
+  }
+
+  async createBibliography(itemType: string, fields: Record<string, unknown>, writeToken: string) {
+    const item = await this.createArchiveItem({ ...fields, itemType }, writeToken);
+    return { itemKey: item.key, version: item.version };
+  }
+
+  private async bibliography(itemKey: string, expectedVersion?: number): Promise<ZoteroItem> {
+    const item = await this.getItem(itemKey);
+    if (["attachment", "note", "annotation"].includes(item.data.itemType) || item.data.parentItem) {
+      throw new ArchiveError("The item must be a top-level bibliography record.");
+    }
+    if (expectedVersion !== undefined && item.version !== expectedVersion) {
+      throw new ArchiveError("The item version changed. Read the record again before editing.");
+    }
+    return item;
+  }
+
+  private async patchBibliography(item: ZoteroItem, fields: Record<string, unknown>) {
+    if (Object.keys(fields).length === 0) return { itemKey: item.key, version: item.version };
+    const response = await this.rateLimitedFetch(`${this.userPrefix}/items/${item.key}`, {
+      method: "PATCH",
+      redirect: "error",
+      headers: this.headers({ "If-Unmodified-Since-Version": String(item.version) }),
+      body: JSON.stringify(fields),
+    });
+    if (response.status === 412) {
+      await response.body?.cancel();
+      throw new ArchiveError("The item changed during the request. Read it again before editing.");
+    }
+    await this.throwOnError(response, "patchBibliography");
+    const version = Number(response.headers.get("Last-Modified-Version"));
+    return { itemKey: item.key, version: version || (await this.getItem(item.key)).version };
+  }
+
+  async editBibliography(itemKey: string, version: number, fields: Record<string, unknown>) {
+    return this.patchBibliography(await this.bibliography(itemKey, version), fields);
+  }
+
+  async setLiteratureNumberTag(itemKey: string, version: number, literatureId: string) {
+    const item = await this.bibliography(itemKey, version);
+    this.checkArchiveLocation(item, literatureId);
+    const canonical = `文献番号: ${literatureId}`;
+    const tags = item.data.tags ?? [];
+    const numbered = tags.filter(({ tag }) => /^文献番号\s*[:：]/u.test(tag));
+    if (numbered.some(({ tag }) => tag.split(/[:：]/u)[1]?.trim() !== literatureId)) {
+      throw new ArchiveError("A different permanent number tag already exists. Resolve the conflict in the registry.");
+    }
+    if (numbered.length === 1 && numbered[0].tag === canonical) {
+      return { itemKey, version };
+    }
+    return this.patchBibliography(item, {
+      tags: [...tags.filter(({ tag }) => !/^文献番号\s*[:：]/u.test(tag)), { tag: canonical }],
+    });
+  }
+
+  private checkArchiveLocation(item: ZoteroItem, literatureId: string) {
+    const current = item.data.archiveLocation;
+    if (current && current !== literatureId) {
+      throw new ArchiveError("archiveLocation already has a different value. Resolve the conflict in the registry.");
+    }
+  }
+
+  async setArchiveLocation(itemKey: string, version: number, literatureId: string) {
+    const item = await this.bibliography(itemKey, version);
+    this.checkArchiveLocation(item, literatureId);
+    const numbers = (item.data.tags ?? []).filter(({ tag }) => /^文献番号\s*[:：]/u.test(tag));
+    if (numbers.some(({ tag }) => tag.split(/[:：]/u)[1]?.trim() !== literatureId)) {
+      throw new ArchiveError("The permanent number tag conflicts with archiveLocation.");
+    }
+    return this.patchBibliography(item, item.data.archiveLocation === literatureId
+      ? {} : { archiveLocation: literatureId });
+  }
+
+  private async findArchiveAttachment(parentKey: string, filename: string): Promise<ZoteroItem | undefined> {
+    const matches: ZoteroItem[] = [];
+    for (let start = 0; ; start += 100) {
+      const url = `${this.userPrefix}/items/${parentKey}/children?format=json&limit=100&start=${start}`;
+      const response = await this.rateLimitedFetch(url, { headers: this.headers(), redirect: "error" });
+      await this.throwOnError(response, "findArchiveAttachment");
+      const children = await response.json() as ZoteroItem[];
+      matches.push(...children.filter(({ data }) => data.itemType === "attachment" && data.filename === filename));
+      if (children.length < 100) break;
+    }
+    if (matches.length > 1) throw new ArchiveError("More than one child attachment has this archive filename.");
+    const match = matches[0];
+    if (match && (match.data.linkMode !== "imported_file" || match.data.contentType !== "application/pdf")) {
+      throw new ArchiveError("An incompatible attachment already uses this archive filename.");
+    }
+    return match;
+  }
+
+  async uploadArchivePdf(parentKey: string, literatureId: string, bytes: Buffer) {
+    if (bytes.length > MAX_ARCHIVE_PDF_BYTES || !bytes.subarray(0, 5).equals(Buffer.from("%PDF-"))) {
+      throw new ArchiveError("Provide a PDF with a %PDF- header and at most 16 MiB.");
+    }
+    const parent = await this.bibliography(parentKey);
+    const tags = (parent.data.tags ?? []).filter(({ tag }) => /^文献番号\s*[:：]/u.test(tag));
+    if (parent.data.archiveLocation !== literatureId || tags.length !== 1 ||
+        tags[0].tag !== `文献番号: ${literatureId}`) {
+      throw new ArchiveError("Set the matching canonical number tag and archiveLocation on the parent first.");
+    }
+
+    const filename = `${literatureId}.pdf`;
+    const md5 = createHash("md5").update(bytes).digest("hex");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    let attachment = await this.findArchiveAttachment(parentKey, filename);
+    if (!attachment) {
+      const writeToken = createHash("sha256").update(`archive-pdf:${this.libraryType}:${this.libraryId}:${parentKey}:${filename}`)
+        .digest("hex").slice(0, 32);
+      attachment = await this.createArchiveItem({
+        itemType: "attachment", linkMode: "imported_file", parentItem: parentKey,
+        title: filename, filename, contentType: "application/pdf",
+      }, writeToken);
+    }
+    const attachmentKey = attachment.key;
+    if (attachment.data.md5 && attachment.data.md5 !== md5) {
+      throw new ArchiveError("The existing numbered PDF has different bytes. No file was overwritten.");
+    }
+
+    if (!attachment.data.md5) {
+      await this.transferArchivePdf(attachmentKey, filename, md5, bytes);
+    }
+    const downloaded = await this.downloadAttachment(attachmentKey);
+    const actual = createHash("sha256").update(Buffer.from(downloaded.data, "base64")).digest("hex");
+    if (actual !== sha256) throw new ArchiveError("The downloaded PDF does not match the supplied bytes.");
+    return { parentKey, attachmentKey, filename, bytes: bytes.length, sha256 };
+  }
+
+  private async transferArchivePdf(attachmentKey: string, filename: string, md5: string, bytes: Buffer) {
+    const url = `${this.userPrefix}/items/${attachmentKey}/file`;
+    const postForm = (data: Record<string, string>) => this.rateLimitedFetch(url, {
+      method: "POST",
+      redirect: "error",
+      headers: this.headers({
+        "Content-Type": "application/x-www-form-urlencoded",
+        "If-None-Match": "*",
+      }),
+      body: new URLSearchParams(data),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const authorization = await postForm({
+      md5, filename, filesize: String(bytes.length), mtime: String(Date.now()),
+    });
+    await this.throwOnError(authorization, "authorize PDF upload");
+    const upload = await authorization.json() as UploadAuthorization;
+    if ("exists" in upload && upload.exists === 1) return;
+    if (!("url" in upload) || typeof upload.url !== "string" ||
+        typeof upload.uploadKey !== "string" || !upload.uploadKey ||
+        typeof upload.contentType !== "string" || !upload.contentType.startsWith("multipart/form-data;") ||
+        typeof upload.prefix !== "string" || typeof upload.suffix !== "string") {
+      throw new ArchiveError("Unexpected PDF upload authorization response.");
+    }
+    const storage = new URL(upload.url);
+    if (storage.protocol !== "https:" || (storage.port && storage.port !== "443") ||
+        storage.username || storage.password ||
+        !storage.hostname.endsWith(".amazonaws.com") ||
+        (this.apiKey && storage.href.includes(this.apiKey))) {
+      throw new ArchiveError("The authorized PDF storage destination was rejected.");
+    }
+    // Only the signed form is sent to storage. No Zotero credential is forwarded.
+    const transfer = await fetch(storage, {
+      method: "POST",
+      redirect: "error",
+      headers: { "Content-Type": upload.contentType },
+      body: new Uint8Array(Buffer.concat([Buffer.from(upload.prefix), bytes, Buffer.from(upload.suffix)])),
+      signal: AbortSignal.timeout(180_000),
+    });
+    await this.throwOnError(transfer, "transfer PDF bytes");
+    await transfer.body?.cancel();
+    const registered = await postForm({ upload: upload.uploadKey });
+    await this.throwOnError(registered, "register PDF upload");
+    await registered.body?.cancel();
   }
 
   /**

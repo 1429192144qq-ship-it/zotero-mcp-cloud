@@ -47,6 +47,8 @@ export interface HttpServerOptions {
   sessionIdleMs?: number;
   /** Maximum JSON request body size in bytes. Default: 1 MiB. */
   maxBodyBytes?: number;
+  /** Larger body allowance for existing authenticated write sessions. */
+  maxWriteBodyBytes?: number;
   /** If set, reject requests whose Host header is not listed. */
   allowedHosts?: string[];
   /** Log sink (stderr by default; stdout is never used). */
@@ -140,10 +142,6 @@ export function createHttpServer(options: HttpServerOptions): Server {
     client: TokenEntry,
   ): Promise<void> {
     const sessionHeader = req.headers["mcp-session-id"];
-    const body = req.method === "POST"
-      ? await readJsonBody(req, maxBodyBytes)
-      : undefined;
-
     if (sessionHeader !== undefined) {
       const session =
         typeof sessionHeader === "string" ? sessions.get(sessionHeader) : undefined;
@@ -152,11 +150,14 @@ export function createHttpServer(options: HttpServerOptions): Server {
       if (!session || session.label !== client.label) {
         throw new HttpError(404, -32001, "Session not found");
       }
+      const limit = enableWrite && client.canWrite ? options.maxWriteBodyBytes ?? maxBodyBytes : maxBodyBytes;
+      const body = req.method === "POST" ? await readJsonBody(req, limit) : undefined;
       session.lastSeen = Date.now();
       await session.transport.handleRequest(req, res, body);
       return;
     }
 
+    const body = req.method === "POST" ? await readJsonBody(req, maxBodyBytes) : undefined;
     if (req.method !== "POST" || !isInitializeRequest(body)) {
       throw new HttpError(400, -32000, "Bad Request: No valid session ID provided");
     }
