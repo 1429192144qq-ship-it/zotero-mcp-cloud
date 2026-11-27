@@ -69,7 +69,7 @@ describe("tool registration", () => {
     expect(stub.addItemToCollection).not.toHaveBeenCalled();
   });
 
-  it("registers all nine tools when writes are allowed", async () => {
+  it("registers read and write tools when writes are allowed", async () => {
     ({ client } = await connect(stub, { allowWrite: true }));
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(

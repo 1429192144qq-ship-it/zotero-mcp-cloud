@@ -362,6 +362,27 @@ describe("request limits", () => {
     expect(res.status).toBe(413);
   });
 
+  it("allows larger requests only in an established write session", async () => {
+    const { base } = await start({ enableWrite: true, maxBodyBytes: 1024, maxWriteBodyBytes: 4096 });
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping", params: { padding: "x".repeat(1500) } });
+    for (const [token, expected] of [[roToken, 413], [rwToken, 200]] as const) {
+      const init = await fetch(`${base}/mcp`, {
+        method: "POST", headers: { ...MCP_HEADERS, Authorization: `Bearer ${token}` },
+        body: JSON.stringify(INIT_BODY),
+      });
+      const session = init.headers.get("mcp-session-id");
+      expect(session).toBeTruthy();
+      await init.text();
+      const result = await fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: { ...MCP_HEADERS, Authorization: `Bearer ${token}`, "Mcp-Session-Id": session! },
+        body,
+      });
+      expect(result.status).toBe(expected);
+      await result.text();
+    }
+  });
+
   it("caps concurrent sessions", async () => {
     const { base } = await start({ maxSessions: 1 });
     await connectClient(base, roToken);

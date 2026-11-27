@@ -256,6 +256,33 @@ item keys to their first PDF attachment.
 | `itemKey`     | string  | Yes      | Attachment or parent item key                        |
 | `forceRemote` | boolean | No       | Skip local file, download from API (default: false)  |
 
+## Literature archive
+
+These tools use the Zotero Web API. On Railway they require a static bearer token
+with the `rw` role and `ZOTERO_MCP_ENABLE_WRITE=true`. Read-only static tokens
+and OAuth sessions retain their existing read tools.
+
+| Tool | Operation |
+| --- | --- |
+| `check_archive_permissions` | Read the configured Zotero credential's item and file write grants without writing. |
+| `create_bibliography` | Create a parent record with a caller-supplied Zotero write token. |
+| `edit_bibliography` | Patch selected bibliographic fields using a Zotero version precondition. |
+| `set_literature_number_tag` | Apply or normalize the published `文献番号: NNN` tag while preserving unrelated tags. |
+| `set_archive_location` | Set `archiveLocation` to the published number. Conflicting values are protected. |
+| `upload_archive_pdf` | Authorize, transfer, register and read back the numbered PDF (up to 16 MiB). |
+
+Use the permanent number published by the authoritative literature registry.
+Check for duplicate bibliography entries before creating one. `get_item`
+includes the version in structured output. Use the latest version for each edit.
+Keep the creation token for retries and check for an existing item before retrying
+an ambiguous creation. If an upload fails mid-operation, retry with the same PDF.
+The service reuses the same numbered child and refuses to overwrite different
+file contents. A successful response includes the read-back SHA-256, attachment
+key and byte count.
+
+The permission check cannot establish storage quota or live upload success.
+Tests use simulated Zotero and storage responses.
+
 ## Development
 
 ```bash
