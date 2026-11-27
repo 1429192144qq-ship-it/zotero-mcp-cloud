@@ -14,6 +14,7 @@
  *   DELETE /mcp     → close an existing session
  */
 
+import { createOAuthVerifier, protectedResource, type OAuthOptions } from "./oauth.js";
 import { randomUUID } from "node:crypto";
 import {
   createServer,
@@ -33,6 +34,7 @@ import {
 export interface HttpServerOptions {
   /** Accepted tokens. Must be non-empty. */
   tokens: readonly TokenEntry[];
+  oauth?: OAuthOptions;
   /** Builds the MCP server for a new session. */
   createMcpServer: (ctx: { allowWrite: boolean; label: string }) => McpServer;
   /** Server-wide switch for write tools. Default: false. */
@@ -45,6 +47,8 @@ export interface HttpServerOptions {
   sessionIdleMs?: number;
   /** Maximum JSON request body size in bytes. Default: 1 MiB. */
   maxBodyBytes?: number;
+  /** Larger body allowance for existing authenticated write sessions. */
+  maxWriteBodyBytes?: number;
   /** If set, reject requests whose Host header is not listed. */
   allowedHosts?: string[];
   /** Log sink (stderr by default; stdout is never used). */
@@ -100,11 +104,12 @@ async function readJsonBody(
 }
 
 export function createHttpServer(options: HttpServerOptions): Server {
-  if (options.tokens.length === 0) {
+  if (options.tokens.length === 0 && !options.oauth) {
     throw new Error("HTTP transport requires at least one auth token");
   }
 
   const tokens = options.tokens;
+  const verifyOAuth = options.oauth ? createOAuthVerifier(options.oauth) : undefined;
   const enableWrite = options.enableWrite ?? false;
   const mcpPath = options.path ?? "/mcp";
   const maxSessions = options.maxSessions ?? 50;
@@ -137,10 +142,6 @@ export function createHttpServer(options: HttpServerOptions): Server {
     client: TokenEntry,
   ): Promise<void> {
     const sessionHeader = req.headers["mcp-session-id"];
-    const body = req.method === "POST"
-      ? await readJsonBody(req, maxBodyBytes)
-      : undefined;
-
     if (sessionHeader !== undefined) {
       const session =
         typeof sessionHeader === "string" ? sessions.get(sessionHeader) : undefined;
@@ -149,11 +150,14 @@ export function createHttpServer(options: HttpServerOptions): Server {
       if (!session || session.label !== client.label) {
         throw new HttpError(404, -32001, "Session not found");
       }
+      const limit = enableWrite && client.canWrite ? options.maxWriteBodyBytes ?? maxBodyBytes : maxBodyBytes;
+      const body = req.method === "POST" ? await readJsonBody(req, limit) : undefined;
       session.lastSeen = Date.now();
       await session.transport.handleRequest(req, res, body);
       return;
     }
 
+    const body = req.method === "POST" ? await readJsonBody(req, maxBodyBytes) : undefined;
     if (req.method !== "POST" || !isInitializeRequest(body)) {
       throw new HttpError(400, -32000, "Bad Request: No valid session ID provided");
     }
@@ -205,6 +209,9 @@ export function createHttpServer(options: HttpServerOptions): Server {
         }
       }
 
+      if (options.oauth && req.method === "GET" && (url.pathname === "/.well-known/oauth-protected-resource" || url.pathname === "/.well-known/oauth-protected-resource/mcp")) {
+        res.writeHead(200,{"Content-Type":"application/json"}); res.end(JSON.stringify(protectedResource(options.oauth))); return;
+      }
       if (url.pathname !== mcpPath) {
         res.writeHead(404, { "Content-Type": "text/plain" });
         res.end("Not found");
@@ -214,14 +221,15 @@ export function createHttpServer(options: HttpServerOptions): Server {
       // Use rawHeaders: req.headers keeps only the first of repeated
       // Authorization headers, which would hide a duplicate.
       const authValues = authorizationHeaderValues(req.rawHeaders);
-      const client = authenticate(
+      let client = authenticate(
         authValues.length === 1 ? authValues[0] : authValues,
         tokens,
       );
+      if (!client && verifyOAuth && authValues.length === 1) client = await verifyOAuth(authValues[0]);
       if (!client) {
         log(`[auth] rejected ${req.method} ${url.pathname}`);
         sendJsonRpcError(res, 401, -32001, "Unauthorized", {
-          "WWW-Authenticate": 'Bearer realm="zotero-mcp"',
+          "WWW-Authenticate": options.oauth ? `Bearer resource_metadata="${new URL("/.well-known/oauth-protected-resource/mcp",options.oauth.resource).href}", scope="zotero:read"` : 'Bearer realm="zotero-mcp"',
         });
         return;
       }
@@ -235,7 +243,7 @@ export function createHttpServer(options: HttpServerOptions): Server {
       if (error instanceof HttpError) {
         sendJsonRpcError(res, error.status, error.rpcCode, error.message);
       } else {
-        log(`[http] internal error: ${(error as Error).message}`);
+        log("[http] internal error; request details suppressed");
         sendJsonRpcError(res, 500, -32603, "Internal server error");
       }
     });

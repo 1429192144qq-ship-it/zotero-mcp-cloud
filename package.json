@@ -32,6 +32,8 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
+    "jose": "^6.2.12",
+    "pdfjs-dist": "^6.4.299",
     "zod": "^3.25.0"
   },
   "devDependencies": {
@@ -40,7 +42,7 @@
     "vitest": "^4.0.18"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.13.0"
   },
   "repository": {
     "type": "git",

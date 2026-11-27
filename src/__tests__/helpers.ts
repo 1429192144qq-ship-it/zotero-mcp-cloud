@@ -34,6 +34,7 @@ export function mockResponse(opts: MockResponseOptions = {}): Response {
     ok: status >= 200 && status < 300,
     status,
     headers,
+    body: new Response(bodyStr).body,
     json: () => Promise.resolve(opts.body),
     text: () => Promise.resolve(bodyStr),
     arrayBuffer: () =>

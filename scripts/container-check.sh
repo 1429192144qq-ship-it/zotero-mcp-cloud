@@ -96,7 +96,7 @@ AUTH=(-H "$JSON" -H "$ACCEPT" -H "Authorization: Bearer $TOKEN" -H "mcp-session-
 
 tools="$("${CURL[@]}" -X POST "$BASE/mcp" "${AUTH[@]}" -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
   | sse_json | python3 -c 'import json,sys; print(" ".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))')"
-[ "$tools" = "get_item get_item_attachments get_item_fulltext list_collections read_attachment search_items" ] \
+[ "$tools" = "get_item get_item_attachments get_item_fulltext list_collections read_attachment read_pdf search_items" ] \
   || fail "unexpected tool list: $tools"
 pass "read-only tool list: $tools"
 

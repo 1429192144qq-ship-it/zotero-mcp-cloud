@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { oauthFromEnv } from "./oauth.js";
 
 /**
  * Zotero MCP Server
@@ -39,7 +40,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { ZoteroClient } from "./zotero-api.js";
+import { MAX_ARCHIVE_PDF_BYTES, ZoteroClient } from "./zotero-api.js";
 import { createZoteroServer } from "./server.js";
 import { parseTokenHashes } from "./auth.js";
 import { createHttpServer } from "./http.js";
@@ -144,7 +145,8 @@ async function main(): Promise<void> {
     console.error(`Error: ${(error as Error).message}`);
     process.exit(1);
   }
-  if (tokens.length === 0) {
+  const oauth = oauthFromEnv(process.env);
+  if (tokens.length === 0 && !oauth) {
     console.error(
       "Error: refusing to start the HTTP transport without authentication.\n" +
         "  Set MCP_AUTH_TOKEN_HASHES (generate entries with `npm run token:generate -- <label>`).",
@@ -160,7 +162,9 @@ async function main(): Promise<void> {
 
   const httpServer = createHttpServer({
     tokens,
+    oauth,
     enableWrite,
+    maxWriteBodyBytes: Math.ceil(MAX_ARCHIVE_PDF_BYTES / 3) * 4 + 1024 * 1024,
     allowedHosts,
     createMcpServer: ({ allowWrite }) =>
       createZoteroServer(zotero, { allowWrite, dataDir }),
@@ -175,6 +179,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error("Fatal error:", error);
+  console.error("Fatal startup error; details suppressed to protect credentials");
   process.exit(1);
 });

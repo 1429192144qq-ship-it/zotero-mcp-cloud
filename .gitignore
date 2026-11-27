@@ -4,3 +4,5 @@ dist/
 .env
 *.tgz
 .claude/
+.pnpm-store/
+pnpm-lock.yaml
